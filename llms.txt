@@ -1,0 +1,9 @@
+# Patakeja
+
+> Patakeja (www.patakeja.co.ke) is a Kenyan rental marketplace that connects tenants with landlords and agents. Save time, save your money.
+
+- Tenants share their details, search by location, pay with M-Pesa and get the landlord's contact directly.
+- Students and workers can share their school or workplace to get homes suggested close to them.
+- Landlords and agents list homes with photos, contact, location and rent details.
+- Fees: KSh 100 to create a landlord/agent account; KSh 50 for a tenant to view a property; KSh 500 to boost a listing for 24 hours.
+- Contact: nziokasila8@gmail.com
