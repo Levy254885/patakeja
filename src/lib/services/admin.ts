@@ -6,6 +6,7 @@
  * settings...) rely on Firestore rules allowing admins to write and on a backend trigger recording the audit entry.
  * Pricing and roles go through the `updatePricing` / `setUserRole` callables, which audit-log themselves.
  */
+import type { QueryConstraint } from "firebase/firestore";
 import {
   collection, deleteDoc, doc, getAggregateFromServer, getCountFromServer, getDoc, getDocs, limit, orderBy, query, serverTimestamp,
   setDoc, sum, updateDoc, where, writeBatch,
@@ -33,7 +34,7 @@ async function whereEq<T extends { id: string; createdAt?: number }>(name: strin
   return fromSnaps<T>(s.docs).sort((a, b) => (b.createdAt ?? 0) - (a.createdAt ?? 0));
 }
 
-async function count(name: string, ...c: unknown[]): Promise<number> {
+async function count(name: string, ...c: QueryConstraint[]): Promise<number> {
   const s = await getCountFromServer(query(col(name), ...c));
   return s.data().count as number;
 }
