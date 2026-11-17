@@ -19,10 +19,13 @@ function Form() {
     e.preventDefault(); setError(""); setBusy(true);
     try {
       await signIn(email, password);
-      await refreshProfile();
-      const tok = await getAuthClient().currentUser?.getIdTokenResult(true);
-      const claim = tok?.claims?.role as any;
-      router.replace(next && next.startsWith("/") ? next : dashboardPathFor(claim ?? "customer"));
+      let claim: string | undefined;
+      try {
+        await refreshProfile();
+        const tok = await getAuthClient().currentUser?.getIdTokenResult(true);
+        claim = tok?.claims?.role as string | undefined;
+      } catch { /* profile problems must not block login */ }
+      router.replace(next && next.startsWith("/") ? next : dashboardPathFor((claim as any) ?? "customer"));
     } catch (err) { setError(authErrorMessage(err)); } finally { setBusy(false); }
   };
   return (
