@@ -71,8 +71,23 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     }
     const r = token.claims.role as Role | undefined;
     setClaimRole(r && ADMIN_ROLES.includes(r) ? r : null);
-    const snap = await getDoc(doc(getDb(), "users", u.uid));
-    setProfile(fromSnap<UserProfile & { id: string }>(snap) as unknown as UserProfile | null);
+    try {
+      const ref = doc(getDb(), "users", u.uid);
+      let snap = await getDoc(ref);
+      if (!snap.exists()) {
+        // The account exists but its profile was never saved (e.g. sign-up was interrupted). Create a basic one so login works.
+        await setDoc(ref, clean({
+          uid: u.uid, email: (u.email ?? "").toLowerCase(), role: "customer", fullName: u.displayName || (u.email ?? "").split("@")[0],
+          phone: "", shareInstitution: false, verification: "none", createdAt: serverTimestamp(), updatedAt: serverTimestamp(),
+        }));
+        snap = await getDoc(ref);
+      }
+      setProfile(fromSnap<UserProfile & { id: string }>(snap) as unknown as UserProfile | null);
+    } catch (e) {
+      // Do not block sign-in because the profile could not be read; the pages show what is missing.
+      console.error("Could not load profile", e);
+      setProfile(null);
+    }
   }, []);
 
   useEffect(() => {
@@ -124,6 +139,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         await setDoc(doc(getDb(), "users", cred.user.uid), data);
         if (input.role !== "customer") {
           await setDoc(doc(getDb(), "publicProfiles", cred.user.uid), clean({
+            id: cred.user.uid,
             name: input.fullName.trim(),
             role: input.role,
             companyName: input.companyName?.trim() || undefined,
@@ -167,6 +183,13 @@ export function authErrorMessage(err: unknown): string {
     "auth/too-many-requests": "Too many attempts. Please wait a few minutes and try again.",
     "auth/network-request-failed": "Network error. Check your connection and try again.",
     "auth/user-disabled": "This account has been disabled. Contact support.",
+    "auth/operation-not-allowed": "Email/password sign-in is not enabled. Enable it in Firebase Console > Authentication > Sign-in method.",
+    "auth/unauthorized-domain": "This website's domain is not authorised. Add it in Firebase Console > Authentication > Settings > Authorized domains.",
+    "auth/invalid-api-key": "The Firebase API key is wrong. Check NEXT_PUBLIC_FIREBASE_API_KEY in Vercel and redeploy.",
+    "auth/configuration-not-found": "Firebase Authentication is not set up. In Firebase Console open Authentication and click Get started.",
+    "permission-denied": "Your account was created, but the database rejected saving your profile. Publish firestore.rules in Firebase Console > Firestore > Rules, then log in.",
+    "unavailable": "Could not reach the database. Make sure Firestore is created in Firebase Console (Build > Firestore Database), then try logging in.",
+    "failed-precondition": "The database is not ready. Create Firestore in Firebase Console, then try again.",
   };
   return map[code] ?? (err instanceof Error && !code ? err.message : "Something went wrong. Please try again.");
 }
