@@ -1,0 +1,164 @@
+rules_version = '2';
+// PataKeja Firestore rules. NOT yet exercised against the emulator (see docs/TESTING.md).
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // ---------- helpers ----------
+    function signedIn() { return request.auth != null; }
+    function isOwner(uid) { return signedIn() && request.auth.uid == uid; }
+    function claimRole() { return signedIn() && 'role' in request.auth.token ? request.auth.token.role : null; }
+    function isAdmin() { return claimRole() in ['admin', 'superAdmin']; }
+    function isSuper() { return claimRole() == 'superAdmin'; }
+    function changed(keys) { return request.resource.data.diff(resource.data).affectedKeys().hasAny(keys); }
+    function onlyChanges(keys) { return request.resource.data.diff(resource.data).affectedKeys().hasOnly(keys); }
+    function approvalRequired() {
+      return !exists(/databases/$(database)/documents/siteSettings/general)
+        || get(/databases/$(database)/documents/siteSettings/general).data.get('requireListingApproval', true) == true;
+    }
+    function ownerPropertyStatusOk() {
+      return request.resource.data.status in ['draft', 'pending', 'archived']
+        || (request.resource.data.status == 'published' && !approvalRequired());
+    }
+    // Fields only Cloud Functions or admins may touch on a property.
+    function serverPropertyFields() { return ['boostedUntil', 'stats', 'verified', 'featured', 'isDemo', 'ownerId', 'owner']; }
+
+    // ---------- users ----------
+    match /users/{uid} {
+      allow read: if isOwner(uid) || isAdmin();
+      allow create: if isOwner(uid)
+        && request.resource.data.uid == uid
+        && request.resource.data.role in ['customer', 'landlord', 'agent']
+        && !('registrationFeePaid' in request.resource.data && request.resource.data.registrationFeePaid == true)
+        && (!('verification' in request.resource.data) || request.resource.data.verification in ['none', 'pending']);
+      // Owners may not change role, payment flags, verification outcome or disabled state.
+      allow update: if (isOwner(uid) && !changed(['role', 'uid', 'email', 'registrationFeePaid', 'disabled', 'verification']))
+        || (isAdmin() && !changed(['role', 'registrationFeePaid', 'uid']));
+      allow delete: if false;
+
+      match /recentlyViewed/{pid} {
+        allow read, write: if isOwner(uid);
+      }
+    }
+
+    match /publicProfiles/{uid} {
+      allow read: if true;
+      allow create: if isOwner(uid) && request.resource.data.id == uid
+        && request.resource.data.role in ['agent', 'landlord']
+        && !request.resource.data.get('verified', false);
+      allow update: if (isOwner(uid) && !changed(['verified', 'listingCount', 'role', 'id'])) || isAdmin();
+      allow delete: if isOwner(uid) || isAdmin();
+    }
+
+    // ---------- properties ----------
+    match /properties/{id} {
+      allow read: if resource.data.status == 'published' || isOwner(resource.data.ownerId) || isAdmin();
+      allow create: if signedIn()
+        && request.resource.data.ownerId == request.auth.uid
+        && ownerPropertyStatusOk()
+        && !('boostedUntil' in request.resource.data) && request.resource.data.get('featured', false) == false
+        && request.resource.data.get('verified', false) == false
+        && (isAdmin() || get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role in ['landlord', 'agent']);
+      allow update: if (isOwner(resource.data.ownerId)
+            && !changed(serverPropertyFields())
+            && ownerPropertyStatusOk())
+        || isAdmin();
+      allow delete: if isOwner(resource.data.ownerId) || isAdmin();
+
+      // Phone numbers etc. Never public.
+      match /private/{doc} {
+        allow read: if isOwner(get(/databases/$(database)/documents/properties/$(id)).data.ownerId)
+          || isAdmin()
+          || (signedIn() && exists(/databases/$(database)/documents/contactUnlocks/$(request.auth.uid + '_' + id)));
+        allow write: if isOwner(get(/databases/$(database)/documents/properties/$(id)).data.ownerId)
+          || isAdmin();
+      }
+    }
+
+    // ---------- public catalogue ----------
+    match /propertyCategories/{id} { allow read: if true; allow write: if isAdmin(); }
+    match /amenities/{id}          { allow read: if true; allow write: if isAdmin(); }
+    match /locations/{id}          { allow read: if true; allow write: if isAdmin(); }
+    match /helpArticles/{id}       { allow read: if resource.data.published == true || isAdmin(); allow write: if isAdmin(); }
+    match /faqs/{id}               { allow read: if resource.data.published == true || isAdmin(); allow write: if isAdmin(); }
+
+    match /siteSettings/{id} {
+      allow read: if true;
+      // Pricing is changed only through the updatePricing callable (audit logged).
+      allow write: if isAdmin() && id != 'pricing';
+    }
+
+    // ---------- leads ----------
+    match /inquiries/{id} {
+      allow create: if request.resource.data.status == 'new'
+        && (!('customerId' in request.resource.data) || (signedIn() && request.resource.data.customerId == request.auth.uid))
+        && request.resource.data.message is string && request.resource.data.message.size() <= 2000
+        && request.resource.data.name is string && request.resource.data.phone is string;
+      allow read: if signedIn() && (resource.data.ownerId == request.auth.uid || resource.data.get('customerId', '') == request.auth.uid) || isAdmin();
+      allow update: if (signedIn() && resource.data.ownerId == request.auth.uid && onlyChanges(['status', 'updatedAt'])) || isAdmin();
+      allow delete: if isAdmin();
+    }
+    match /viewingAppointments/{id} {
+      allow create: if request.resource.data.status == 'pending'
+        && (!('customerId' in request.resource.data) || (signedIn() && request.resource.data.customerId == request.auth.uid));
+      allow read: if signedIn() && (resource.data.ownerId == request.auth.uid || resource.data.get('customerId', '') == request.auth.uid) || isAdmin();
+      allow update: if (signedIn() && resource.data.ownerId == request.auth.uid && onlyChanges(['status', 'updatedAt']))
+        || (signedIn() && resource.data.get('customerId', '') == request.auth.uid && onlyChanges(['status', 'updatedAt']) && request.resource.data.status == 'cancelled')
+        || isAdmin();
+      allow delete: if isAdmin();
+    }
+
+    match /savedProperties/{id} {
+      allow read: if signedIn() && resource.data.userId == request.auth.uid;
+      allow create: if signedIn() && request.resource.data.userId == request.auth.uid && id == request.auth.uid + '_' + request.resource.data.propertyId;
+      allow delete: if signedIn() && resource.data.userId == request.auth.uid;
+      allow update: if false;
+    }
+
+    // ---------- server-written collections ----------
+    match /notifications/{id} {
+      allow read: if signedIn() && resource.data.userId == request.auth.uid;
+      allow update: if signedIn() && resource.data.userId == request.auth.uid && onlyChanges(['read']);
+      allow delete: if signedIn() && resource.data.userId == request.auth.uid;
+      allow create: if false;
+    }
+    match /payments/{id} {
+      allow read: if signedIn() && resource.data.userId == request.auth.uid || isAdmin();
+      allow write: if false;
+    }
+    match /contactUnlocks/{id} {
+      allow read: if signedIn() && resource.data.userId == request.auth.uid || isAdmin();
+      allow write: if false;
+    }
+    match /boostCampaigns/{id} {
+      allow read: if signedIn() && resource.data.ownerId == request.auth.uid || isAdmin();
+      allow write: if false;
+    }
+    match /auditLogs/{id} {
+      allow read: if isAdmin();
+      allow write: if false;
+    }
+
+    // ---------- moderation / support ----------
+    match /verificationRequests/{id} {
+      allow create: if signedIn() && request.resource.data.userId == request.auth.uid && request.resource.data.status == 'pending';
+      allow read: if signedIn() && resource.data.userId == request.auth.uid || isAdmin();
+      allow update: if isAdmin();
+      allow delete: if false;
+    }
+    match /reports/{id} {
+      allow create: if request.resource.data.status == 'open'
+        && (!('reporterId' in request.resource.data) || (signedIn() && request.resource.data.reporterId == request.auth.uid));
+      allow read, update: if isAdmin();
+      allow delete: if false;
+    }
+    match /supportTickets/{id} {
+      allow create: if signedIn() && request.resource.data.userId == request.auth.uid && request.resource.data.status == 'open';
+      allow read: if signedIn() && resource.data.userId == request.auth.uid || isAdmin();
+      allow update: if (signedIn() && resource.data.userId == request.auth.uid && onlyChanges(['replies', 'updatedAt', 'status']))
+        || isAdmin();
+      allow delete: if false;
+    }
+
+    match /{document=**} { allow read, write: if false; }
+  }
+}
